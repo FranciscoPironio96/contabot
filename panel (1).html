@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ContaBot — Panel</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=Epilogue:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script type="module">
+  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
+
+  // ============================================================
+  // CONFIGURACIÓN — reemplazá con tus datos de Supabase
+  // ============================================================
+  const SUPABASE_URL      = 'https://tlqoumalfdcaugwmnleb.supabase.co'
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRscW91bWFsZmRjYXVnd21ubGViIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTA4NDIxNywiZXhwIjoyMDkwNjYwMjE3fQ.4pyYkD6w_3JuI6OiXpX9-SVDnRK8WNV-Jx5FER0ClOc'
+  const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+  // ============================================================
+  // ESTADO GLOBAL
+  // ============================================================
+  let session = null
+  let estudioId = null
+  let estudioNombre = null
+
+  // ============================================================
+  // ARRANQUE
+  // ============================================================
+  window.addEventListener('DOMContentLoaded', async () => {
+    const { data: { session: s } } = await sb.auth.getSession()
+    if (s) {
+      session = s
+      await iniciarPanel()
+    } else {
+      mostrarLogin()
+    }
+
+    sb.auth.onAuthStateChange(async (event, s) => {
+      if (event === 'SIGNED_IN') {
+        session = s
+        await iniciarPanel()
+      }
+      if (event === 'SIGNED_OUT') {
+        session = null
+        mostrarLogin()
+      }
+    })
+  })
+
+  // ============================================================
+  // LOGIN
+  // ============================================================
+  function mostrarLogin() {
+    document.getElementById('login-screen').style.display = 'flex'
+    document.getElementById('panel-screen').style.display = 'none'
+  }
+
+  window.handleLogin = async () => {
+    const email = document.getElementById('login-email').value
+    const pass  = document.getElementById('login-pass').value
+    const errEl = document.getElementById('login-error')
+    const btn   = document.getElementById('login-btn')
+
+    btn.textContent = 'Ingresando...'
+    btn.disabled = true
+    errEl.textContent = ''
+
+    const { error } = await sb.auth.signInWithPassword({ email, password: pass })
+
+    if (error) {
+      errEl.textContent = 'Email o contraseña incorrectos'
+      btn.textContent = 'Ingresar'
+      btn.disabled = false
+    }
+  }
+
+  window.handleLogout = async () => {
+    await sb.auth.signOut()
+  }
+
+  // ============================================================
+  // INICIAR PANEL
+  // ============================================================
+  async function iniciarPanel() {
+    document.getElementById('login-screen').style.display = 'none'
+    document.getElementById('panel-screen').style.display = 'grid'
+
+    // Obtener datos del estudio
+    const { data: usuario } = await sb
+      .from('usuarios')
+      .select('estudio_id, nombre, estudios(nombre)')
+      .eq('id', session.user.id)
+      .single()
+
+    if (usuario) {
+      estudioId     = usuario.estudio_id
+      estudioNombre = usuario.estudios?.nombre || 'Mi Estudio'
+      document.getElementById('estudio-nombre').textContent = estudioNombre
+      document.getElementById('usuario-nombre').textContent = usuario.nombre
+    }
+
+    await cargarDashboard()
+  }
+
+  // ============================================================
+  // DASHBOARD
+  // ============================================================
+  async function cargarDashboard() {
+    mostrarSkeleton()
+    await Promise.all([
+      cargarKPIs(),
+      cargarVencimientos(),
+      cargarDocumentos()
+    ])
+  }
+
+  async function cargarKPIs() {
+    const hoy = new Date().toISOString().split('T')[0]
+    const en7  = new Date(Date.now() + 7*86400000).toISOString().split('T')[0]
+
+    // Vencimientos hoy
+    const { data: hoyData } = await sb
+      .from('alertas_pendientes')
+      .select('*')
+      .eq('dias_restantes', 0)
+
+    // Próximos 7 días
+    const { data: semanaData } = await sb
+      .from('alertas_pendientes')
+      .select('*')
+      .lte('dias_restantes', 7)
+      .gt('dias_restantes', 0)
+
+    // Presentados este mes
+    const primerDiaMes = new Date()
+    primerDiaMes.setDate(1)
+    const { data: presData } = await sb
+      .from('presentaciones')
+      .select('*')
+      .eq('estudio_id', estudioId)
+      .gte('presentado_at', primerDiaMes.toISOString())
+
+    // Total clientes
+    const { count: totalClientes } = await sb
+      .from('clientes')
+      .select('*', { count: 'exact', head: true })
+      .eq('estudio_id', estudioId)
+      .eq('activo', true)
+
+    document.getElementById('kpi-hoy').textContent    = hoyData?.length || 0
+    document.getElementById('kpi-semana').textContent = semanaData?.length || 0
+    document.getElementById('kpi-pres').textContent   = presData?.length || 0
+    document.getElementById('kpi-cli').textContent    = totalClientes || 0
+  }
+
+  async function cargarVencimientos() {
+    const { data, error } = await sb
+      .from('alertas_pendientes')
+      .select('*')
+      .order('dias_restantes', { ascending: true })
+      .limit(20)
+
+    const tbody = document.getElementById('tabla-vencimientos')
+
+    if (error || !data || data.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="6" style="text-align:center; padding:40px; color:var(--muted)">
+            ✅ Sin vencimientos próximos en los próximos 7 días
+          </td>
+        </tr>`
+      return
+    }
+
+    tbody.innerHTML = data.map(v => {
+      const dias = parseInt(v.dias_restantes)
+      let pill = ''
+      let fechaColor = ''
+
+      if (dias === 0) {
+        pill = '<span class="pill pill-red">Hoy</span>'
+        fechaColor = 'style="color:var(--red);font-weight:700"'
+      } else if (dias <= 3) {
+        pill = `<span class="pill pill-amber">${dias} días</span>`
+        fechaColor = 'style="color:var(--amber);font-weight:600"'
+      } else {
+        pill = `<span class="pill pill-gray">${dias} días</span>`
+      }
+
+      const fecha = new Date(v.fecha_vencimiento + 'T00:00:00')
+      const fechaStr = fecha.toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit', year:'numeric' })
+
+      return `
+        <tr>
+          <td>
+            <div class="client-name">${v.cliente_nombre}</div>
+            <div class="client-cuit">${v.cuit}</div>
+          </td>
+          <td>${v.obligacion}</td>
+          <td ${fechaColor}>${fechaStr}</td>
+          <td>${pill}</td>
+          <td>
+            <span class="pill pill-amber">Pendiente</span>
+          </td>
+          <td>
+            <button class="btn-sm primary" onclick="marcarPresentado('${v.cliente_id}','${v.vencimiento_id}', this)">
+              Marcar OK
+            </button>
+          </td>
+        </tr>`
+    }).join('')
+  }
+
+  async function cargarDocumentos() {
+    const { data, error } = await sb
+      .from('documentos')
+      .select('*, clientes(nombre)')
+      .eq('estudio_id', estudioId)
+      .order('recibido_at', { ascending: false })
+      .limit(5)
+
+    const tbody = document.getElementById('tabla-docs')
+
+    if (error || !data || data.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="4" style="text-align:center; padding:32px; color:var(--muted)">
+            Sin documentos recibidos todavía
+          </td>
+        </tr>`
+      return
+    }
+
+    tbody.innerHTML = data.map(d => {
+      const fecha = new Date(d.recibido_at)
+      const fechaStr = fecha.toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })
+
+      return `
+        <tr>
+          <td><div class="client-name">${d.clientes?.nombre || '—'}</div></td>
+          <td><span style="font-family:'DM Mono',monospace;font-size:12px">${d.nombre_archivo}</span></td>
+          <td>${d.periodo || '—'}</td>
+          <td>
+            ${d.drive_url
+              ? `<a href="${d.drive_url}" target="_blank" class="btn-sm">Ver en Drive →</a>`
+              : '<span style="color:var(--muted);font-size:12px">Sin link</span>'
+            }
+          </td>
+        </tr>`
+    }).join('')
+  }
+
+  // ============================================================
+  // MARCAR PRESENTADO
+  // ============================================================
+  window.marcarPresentado = async (clienteId, vencimientoId, btn) => {
+    btn.textContent = 'Guardando...'
+    btn.disabled = true
+
+    const { error } = await sb
+      .from('presentaciones')
+      .insert({
+        cliente_id:     clienteId,
+        estudio_id:     estudioId,
+        vencimiento_id: vencimientoId,
+        presentado_por: session.user.id
+      })
+
+    if (error) {
+      // Si ya existía (unique constraint) igual lo mostramos como OK
+      console.log(error)
+    }
+
+    const row = btn.closest('tr')
+    row.cells[4].innerHTML = '<span class="pill pill-green">Presentado</span>'
+    btn.textContent = 'Listo ✓'
+    btn.disabled = true
+    btn.classList.remove('primary')
+    btn.style.opacity = '0.4'
+
+    // Actualizar KPI
+    const kpiEl = document.getElementById('kpi-pres')
+    kpiEl.textContent = parseInt(kpiEl.textContent) + 1
+  }
+
+  // ============================================================
+  // CLIENTES — cargar lista
+  // ============================================================
+  window.verClientes = async () => {
+    cambiarSeccion('clientes')
+
+    const { data, error } = await sb
+      .from('clientes')
+      .select('*')
+      .eq('estudio_id', estudioId)
+      .eq('activo', true)
+      .order('nombre')
+
+    const tbody = document.getElementById('tabla-clientes')
+
+    if (error || !data || data.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" style="text-align:center; padding:40px; color:var(--muted)">
+            No hay clientes cargados todavía.
+            <button class="btn-sm primary" style="margin-left:12px" onclick="abrirModalCliente()">+ Agregar primero</button>
+          </td>
+        </tr>`
+      return
+    }
+
+    tbody.innerHTML = data.map(c => `
+      <tr>
+        <td><div class="client-name">${c.nombre}</div></td>
+        <td><span style="font-family:'DM Mono',monospace;font-size:12px">${c.cuit}</span></td>
+        <td>${c.categoria}</td>
+        <td>${c.whatsapp ? c.whatsapp.replace('whatsapp:','') : '—'}</td>
+        <td>
+          <span class="pill ${c.avisar_cliente ? 'pill-green' : 'pill-gray'}">
+            ${c.avisar_cliente ? 'Sí' : 'No'}
+          </span>
+        </td>
+      </tr>`).join('')
+  }
+
+  // ============================================================
+  // AGREGAR CLIENTE
+  // ============================================================
+  window.abrirModalCliente = () => {
+    document.getElementById('modal-cliente').classList.add('open')
+  }
+
+  window.cerrarModal = () => {
+    document.getElementById('modal-cliente').classList.remove('open')
+    document.getElementById('form-cliente').reset()
+    document.getElementById('form-error').textContent = ''
+  }
+
+  window.guardarCliente = async () => {
+    const btn    = document.getElementById('btn-guardar')
+    const errEl  = document.getElementById('form-error')
+
+    const nombre   = document.getElementById('f-nombre').value.trim()
+    const cuit     = document.getElementById('f-cuit').value.trim()
+    const categoria = document.getElementById('f-categoria').value
+    const whatsapp = document.getElementById('f-whatsapp').value.trim()
+    const avisar   = document.getElementById('f-avisar').value === 'true'
+
+    if (!nombre || !cuit || !categoria) {
+      errEl.textContent = 'Nombre, CUIT y categoría son obligatorios'
+      return
+    }
+
+    btn.textContent = 'Guardando...'
+    btn.disabled = true
+
+    const waFmt = whatsapp
+      ? 'whatsapp:' + whatsapp.replace(/\s/g,'').replace('whatsapp:','')
+      : null
+
+    const { error } = await sb.from('clientes').insert({
+      estudio_id:     estudioId,
+      nombre,
+      cuit,
+      categoria,
+      whatsapp:       waFmt,
+      avisar_cliente: avisar
+    })
+
+    if (error) {
+      errEl.textContent = error.message.includes('unique')
+        ? 'Ese CUIT ya existe en tu estudio'
+        : 'Error al guardar. Intentá de nuevo.'
+      btn.textContent = 'Guardar cliente'
+      btn.disabled = false
+      return
+    }
+
+    cerrarModal()
+    btn.textContent = 'Guardar cliente'
+    btn.disabled = false
+    await verClientes()
+  }
+
+  // ============================================================
+  // NAVEGACIÓN
+  // ============================================================
+  window.cambiarSeccion = (seccion) => {
+    document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'))
+    document.querySelectorAll('.seccion').forEach(s => s.style.display = 'none')
+
+    document.getElementById('sec-' + seccion).style.display = 'block'
+    document.getElementById('nav-' + seccion).classList.add('active')
+  }
+
+  function mostrarSkeleton() {
+    ['kpi-hoy','kpi-semana','kpi-pres','kpi-cli'].forEach(id => {
+      document.getElementById(id).textContent = '...'
+    })
+  }
+</script>
+<style>
+  :root {
+    --ink: #0f0e0c;
+    --paper: #f5f2eb;
+    --paper2: #edeae0;
+    --white: #fdfcf8;
+    --accent: #1a472a;
+    --accent-light: #2d7a47;
+    --accent-pale: #d4edda;
+    --red: #c0392b;
+    --red-pale: #fde8e8;
+    --amber: #d4760a;
+    --amber-pale: #fef3e2;
+    --muted: #6b6760;
+    --border: #d4cfc4;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    font-family: 'Epilogue', sans-serif;
+    background: var(--paper2);
+    color: var(--ink);
+    min-height: 100vh;
+  }
+
+  /* ── LOGIN ── */
+  #login-screen {
+    display: flex;
+    min-height: 100vh;
+    align-items: center;
+    justify-content: center;
+    background: var(--ink);
+  }
+
+  .login-box {
+    background: var(--white);
+    border-radius: 16px;
+    padding: 48px 40px;
+    width: 380px;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.3);
+  }
+
+  .login-logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 28px;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+
+  .login-sub {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 36px;
+  }
+
+  .form-group { margin-bottom: 18px; }
+
+  .form-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  .form-input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1.5px solid var(--border);
+    border-radius: 7px;
+    font-size: 14px;
+    font-family: 'Epilogue', sans-serif;
+    background: var(--paper);
+    outline: none;
+    transition: border 0.2s;
+  }
+
+  .form-input:focus { border-color: var(--accent); }
+
+  .login-error {
+    font-size: 12px;
+    color: var(--red);
+    margin-bottom: 12px;
+    min-height: 16px;
+  }
+
+  /* ── PANEL ── */
+  #panel-screen {
+    display: none;
+    grid-template-rows: 56px 1fr;
+    grid-template-columns: 220px 1fr;
+    min-height: 100vh;
+  }
+
+  /* TOP NAV */
+  .top-nav {
+    grid-column: 1 / -1;
+    background: var(--white);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+  }
+
+  .nav-logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 18px;
+    color: var(--accent);
+  }
+
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .avatar {
+    width: 30px; height: 30px;
+    background: var(--accent);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 11px; font-weight: 700;
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    background: var(--white);
+    border-right: 1px solid var(--border);
+    padding: 20px 0;
+  }
+
+  .sidebar-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 12px 16px 6px;
+    display: block;
+  }
+
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    margin: 0 8px;
+    border-radius: 7px;
+    transition: all 0.15s;
+  }
+
+  .sidebar-item:hover { background: var(--paper2); color: var(--ink); }
+  .sidebar-item.active { background: var(--accent-pale); color: var(--accent); font-weight: 600; }
+  .sidebar-item .icon { font-size: 15px; width: 20px; text-align: center; }
+
+  /* MAIN */
+  .main-content {
+    padding: 28px 32px;
+    overflow-y: auto;
+  }
+
+  .page-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 26px;
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+  }
+
+  .page-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+
+  /* KPIs */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+
+  .kpi {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+
+  .kpi-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
+  .kpi-value {
+    font-family: 'DM Serif Display', serif;
+    font-size: 34px;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+
+  .kpi-sub { font-size: 11px; color: var(--muted); }
+  .kpi-red .kpi-value { color: var(--red); }
+  .kpi-amber .kpi-value { color: var(--amber); }
+  .kpi-green .kpi-value { color: var(--accent); }
+
+  /* CARDS */
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 20px;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .card-title { font-size: 13px; font-weight: 700; }
+
+  /* TABLE */
+  table { width: 100%; border-collapse: collapse; }
+
+  th {
+    text-align: left;
+    padding: 11px 22px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--paper2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  td {
+    padding: 13px 22px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--paper2); }
+
+  .client-name { font-weight: 600; font-size: 13px; }
+  .client-cuit { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* PILLS */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .pill::before { content:''; width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+  .pill-red    { background:var(--red-pale);    color:var(--red);    } .pill-red::before    { background:var(--red); }
+  .pill-amber  { background:var(--amber-pale);  color:var(--amber);  } .pill-amber::before  { background:var(--amber); }
+  .pill-green  { background:var(--accent-pale); color:var(--accent); } .pill-green::before  { background:var(--accent); }
+  .pill-gray   { background:var(--paper2);      color:var(--muted);  } .pill-gray::before   { background:var(--muted); }
+
+  /* BUTTONS */
+  .btn-sm {
+    padding: 7px 14px;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1.5px solid var(--border);
+    background: transparent;
+    font-family: 'Epilogue', sans-serif;
+    transition: all 0.15s;
+    text-decoration: none;
+    display: inline-block;
+    color: var(--ink);
+  }
+
+  .btn-sm:hover { background: var(--paper2); }
+  .btn-sm.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .btn-sm.primary:hover { background: var(--accent-light); }
+  .btn-sm:disabled { opacity: 0.4; cursor: default; }
+
+  .btn {
+    padding: 11px 24px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    font-family: 'Epilogue', sans-serif;
+    transition: all 0.15s;
+  }
+
+  .btn.primary { background: var(--accent); color: white; }
+  .btn.primary:hover { background: var(--accent-light); }
+  .btn.ghost { background: transparent; border: 1.5px solid var(--border); color: var(--ink); }
+  .btn.ghost:hover { background: var(--paper2); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* MODAL */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(15,14,12,0.5);
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--white);
+    border-radius: 14px;
+    padding: 36px;
+    width: 480px;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.2);
+  }
+
+  .modal-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 22px;
+    margin-bottom: 24px;
+  }
+
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .modal-actions { display: flex; gap: 12px; margin-top: 24px; justify-content: flex-end; }
+  .form-error { font-size: 12px; color: var(--red); margin-top: 8px; min-height: 16px; }
+
+  /* SECCIONES */
+  .seccion { display: none; }
+  #sec-dashboard { display: block; }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════
+     LOGIN
+══════════════════════════════════════════ -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">ContaBot</div>
+    <div class="login-sub">Panel de gestión para estudios contables</div>
+
+    <div class="form-group">
+      <label class="form-label">Email</label>
+      <input class="form-input" type="email" id="login-email" placeholder="contador@estudio.com" />
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Contraseña</label>
+      <input class="form-input" type="password" id="login-pass" placeholder="••••••••"
+        onkeydown="if(event.key==='Enter') handleLogin()" />
+    </div>
+
+    <div class="login-error" id="login-error"></div>
+
+    <button class="btn primary" style="width:100%" id="login-btn" onclick="handleLogin()">
+      Ingresar →
+    </button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     PANEL
+══════════════════════════════════════════ -->
+<div id="panel-screen">
+
+  <!-- TOP NAV -->
+  <nav class="top-nav">
+    <div class="nav-logo">ContaBot</div>
+    <div class="nav-right">
+      <span id="estudio-nombre">—</span>
+      <div class="avatar" id="usuario-nombre">—</div>
+      <button class="btn-sm" onclick="handleLogout()">Salir</button>
+    </div>
+  </nav>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <span class="sidebar-label">Principal</span>
+    <div class="sidebar-item active" id="nav-dashboard" onclick="cambiarSeccion('dashboard'); cargarDashboard()">
+      <span class="icon">📊</span> Dashboard
+    </div>
+    <div class="sidebar-item" id="nav-clientes" onclick="verClientes()">
+      <span class="icon">👥</span> Clientes
+    </div>
+
+    <span class="sidebar-label">Gestión</span>
+    <div class="sidebar-item" id="nav-documentos" onclick="cambiarSeccion('documentos'); cargarDocumentosSeccion()">
+      <span class="icon">📄</span> Documentos
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main-content">
+
+    <!-- DASHBOARD -->
+    <div class="seccion" id="sec-dashboard">
+      <div class="page-title">Dashboard</div>
+      <div class="page-sub" id="fecha-hoy"></div>
+
+      <div class="kpi-grid">
+        <div class="kpi kpi-red">
+          <div class="kpi-label">Vencen hoy</div>
+          <div class="kpi-value" id="kpi-hoy">...</div>
+          <div class="kpi-sub">Requieren atención</div>
+        </div>
+        <div class="kpi kpi-amber">
+          <div class="kpi-label">Próximos 7 días</div>
+          <div class="kpi-value" id="kpi-semana">...</div>
+          <div class="kpi-sub">En la semana</div>
+        </div>
+        <div class="kpi kpi-green">
+          <div class="kpi-label">Presentados este mes</div>
+          <div class="kpi-value" id="kpi-pres">...</div>
+          <div class="kpi-sub">Confirmados ✓</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Clientes activos</div>
+          <div class="kpi-value" id="kpi-cli">...</div>
+          <div class="kpi-sub">En tu estudio</div>
+        </div>
+      </div>
+
+      <!-- VENCIMIENTOS -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">⚠️ Vencimientos próximos</div>
+          <button class="btn-sm" onclick="cargarVencimientos()">↺ Actualizar</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Cliente</th>
+              <th>Obligación</th>
+              <th>Fecha</th>
+              <th>Días</th>
+              <th>Estado</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tabla-vencimientos">
+            <tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted)">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ÚLTIMOS DOCS -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📄 Últimos documentos recibidos</div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Cliente</th>
+              <th>Archivo</th>
+              <th>Período</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tabla-docs">
+            <tr><td colspan="4" style="text-align:center;padding:32px;color:var(--muted)">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- CLIENTES -->
+    <div class="seccion" id="sec-clientes">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:24px">
+        <div>
+          <div class="page-title">Clientes</div>
+          <div class="page-sub">Todos los clientes de tu estudio</div>
+        </div>
+        <button class="btn primary" onclick="abrirModalCliente()">+ Agregar cliente</button>
+      </div>
+
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>CUIT</th>
+              <th>Categoría</th>
+              <th>WhatsApp</th>
+              <th>Avisar cliente</th>
+            </tr>
+          </thead>
+          <tbody id="tabla-clientes">
+            <tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted)">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- DOCUMENTOS -->
+    <div class="seccion" id="sec-documentos">
+      <div class="page-title">Documentos</div>
+      <div class="page-sub">Archivos recibidos por WhatsApp</div>
+      <div class="card" style="margin-top:24px">
+        <table>
+          <thead>
+            <tr>
+              <th>Cliente</th>
+              <th>Archivo</th>
+              <th>Período</th>
+              <th>Drive</th>
+            </tr>
+          </thead>
+          <tbody id="tabla-docs-full">
+            <tr><td colspan="4" style="text-align:center;padding:32px;color:var(--muted)">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- MODAL AGREGAR CLIENTE -->
+<div class="modal-overlay" id="modal-cliente">
+  <div class="modal">
+    <div class="modal-title">Agregar cliente</div>
+    <form id="form-cliente" onsubmit="return false">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Nombre / Razón social</label>
+          <input class="form-input" id="f-nombre" placeholder="Martínez Hnos. SRL" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">CUIT</label>
+          <input class="form-input" id="f-cuit" placeholder="30-71234567-9" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Categoría AFIP</label>
+          <select class="form-input" id="f-categoria">
+            <option value="">— Seleccioná —</option>
+            <option>Responsable Inscripto</option>
+            <option>Monotributista</option>
+            <option>Exento</option>
+            <option>No Responsable</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">WhatsApp cliente</label>
+          <input class="form-input" id="f-whatsapp" placeholder="+54 9 11 1234-5678" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Avisar al cliente también</label>
+        <select class="form-input" id="f-avisar">
+          <option value="true">Sí — avisar al cliente y al estudio</option>
+          <option value="false">No — solo avisar al estudio</option>
+        </select>
+      </div>
+      <div class="form-error" id="form-error"></div>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="cerrarModal()">Cancelar</button>
+        <button class="btn primary" id="btn-guardar" onclick="guardarCliente()">Guardar cliente →</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  // Fecha en el dashboard
+  const fechaEl = document.getElementById('fecha-hoy')
+  if (fechaEl) {
+    fechaEl.textContent = new Date().toLocaleDateString('es-AR', {
+      weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+    })
+  }
+
+  // Cerrar modal al hacer click afuera
+  document.getElementById('modal-cliente').addEventListener('click', function(e) {
+    if (e.target === this) cerrarModal()
+  })
+
+  // Cargar documentos sección completa
+  async function cargarDocumentosSeccion() {
+    // reutiliza la función del módulo ES
+  }
+</script>
+
+</body>
+</html>
